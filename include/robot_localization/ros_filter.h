@@ -38,9 +38,11 @@
 #include "robot_localization/filter_base.h"
 
 #include <robot_localization/SetPose.h>
+#include <robot_localization/ToggleFilterProcessing.h>
 
 #include <ros/ros.h>
 #include <std_msgs/String.h>
+#include <std_srvs/Empty.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 #include <geometry_msgs/Twist.h>
@@ -57,7 +59,7 @@
 #include <diagnostic_updater/publisher.h>
 #include <diagnostic_msgs/DiagnosticStatus.h>
 
-#include <xmlrpcpp/XmlRpcException.h>
+#include <XmlRpcException.h>
 
 #include <Eigen/Dense>
 
@@ -120,6 +122,13 @@ template<class T> class RosFilter
     //! @brief Resets the filter to its initial state
     //!
     void reset();
+
+    //! @brief Service callback to toggle processing measurements for a standby mode but continuing to publish
+    //! @param[in] request - The state requested, on (True) or off (False)
+    //! @param[out] response - status if upon success
+    //! @return boolean true if successful, false if not
+    bool toggleFilterProcessingCallback(robot_localization::ToggleFilterProcessing::Request&,
+                                        robot_localization::ToggleFilterProcessing::Response&);
 
     //! @brief Callback method for receiving all acceleration (IMU) messages
     //! @param[in] msg - The ROS IMU message to take in.
@@ -244,10 +253,12 @@ template<class T> class RosFilter
     bool setPoseSrvCallback(robot_localization::SetPose::Request& request,
                             robot_localization::SetPose::Response&);
 
-    //! @brief Converts tf message filter failures to strings
-    //! @param[in] reason - The failure reason object
-    //! @return a string explanation of the failure
-    std::string tfFailureReasonString(const tf2_ros::FilterFailureReason reason);
+    //! @brief Service callback for manually enable the filter
+    //! @param[in] request - N/A
+    //! @param[out] response - N/A
+    //! @return boolean true if successful, false if not
+    bool enableFilterSrvCallback(std_srvs::Empty::Request&,
+                                 std_srvs::Empty::Response&);
 
     //! @brief Callback method for receiving all twist messages
     //! @param[in] msg - The ROS stamped twist with covariance message to take in.
@@ -257,6 +268,12 @@ template<class T> class RosFilter
     void twistCallback(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg,
                        const CallbackData &callbackData,
                        const std::string &targetFrame);
+
+    //! @brief Validates filter outputs for NaNs and Infinite values
+    //! @param[out] message - The standard ROS odometry message to be validated
+    //! @return true if the filter output is valid, false otherwise
+    //!
+    bool validateFilterOutput(const nav_msgs::Odometry &message);
 
   protected:
     //! @brief Finds the latest filter state before the given timestamp and makes it the current state again.
@@ -280,6 +297,10 @@ template<class T> class RosFilter
     //! @param[in] cutoffTime - Measurements and states older than this time will be dropped.
     //!
     void clearExpiredHistory(const double cutoffTime);
+
+    //! @brief Clears measurement queue
+    //!
+    void clearMeasurementQueue();
 
     //! @brief Adds a diagnostic message to the accumulating map and updates the error level
     //! @param[in] errLevel - The error level of the diagnostic
@@ -388,7 +409,16 @@ template<class T> class RosFilter
 
     //! @brief tf frame name for the robot's body frame
     //!
+    //! All velocity and linear acceleration data is transformed into this frame before being fused
+    //!
     std::string baseLinkFrameId_;
+
+    //! @brief tf frame name for the robot's body frame
+    //!
+    //! When the final state is computed, we "override" the output transform and message to have this frame for its
+    //! child_frame_id. This helps to enable disconnected TF trees when multiple EKF instances are being run.
+    //!
+    std::string baseLinkOutputFrameId_;
 
     //! @brief Subscribes to the control input topic
     //!
@@ -524,6 +554,11 @@ template<class T> class RosFilter
     //!
     std::map<std::string, Eigen::MatrixXd> previousMeasurementCovariances_;
 
+    //! @brief By default, the filter predicts and corrects up to the time of the latest measurement. If this is set
+    //! to true, the filter does the same, but then also predicts up to the current time step.
+    //!
+    bool predictToCurrentTime_;
+
     //! @brief Whether or not we print diagnostic messages to the /diagnostics topic
     //!
     bool printDiagnostics_;
@@ -549,6 +584,15 @@ template<class T> class RosFilter
     //! @brief Whether or not we use smoothing
     //!
     bool smoothLaggedData_;
+
+    //! @brief Service that allows another node to enable the filter. Uses a standard Empty service.
+    //!
+    ros::ServiceServer enableFilterSrv_;
+
+    //! @brief Service that allows another node to toggle on/off filter processing while still publishing.
+    //! Uses a robot_localization ToggleFilterProcessing service.
+    //!
+    ros::ServiceServer toggleFilterProcessingSrv_;
 
     //! @brief Contains the state vector variable names in string format
     //!
@@ -581,6 +625,19 @@ template<class T> class RosFilter
     //! @brief Whether or not we use a control term
     //!
     bool useControl_;
+
+    //! @brief Start the Filter disabled at startup
+    //!
+    //! If this is true, the filter reads parameters and prepares publishers and subscribes
+    //! but does not integrate new messages into the state vector.
+    //! The filter can be enabled later using a service.
+    bool disabledAtStartup_;
+
+    //! @brief Whether the filter is enabled or not. See disabledAtStartup_.
+    bool enabled_;
+
+    //! $brief Whether the filter should process new measurements or not.
+    bool toggledOn_;
 
     //! @brief Message that contains our latest transform (i.e., state)
     //!

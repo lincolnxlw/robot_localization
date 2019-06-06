@@ -37,7 +37,7 @@
 #include "robot_localization/ros_filter_utilities.h"
 
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <xmlrpcpp/XmlRpcException.h>
+#include <XmlRpcException.h>
 
 #include <string>
 
@@ -76,7 +76,9 @@ namespace RobotLocalization
 
   void NavSatTransform::run()
   {
-    ros::Time::init();
+    ROS_INFO("Waiting for valid clock time...");
+    ros::Time::waitForValid();
+    ROS_INFO("Valid clock time received. Starting node.");
 
     double frequency = 10.0;
     double delay = 0.0;
@@ -126,7 +128,7 @@ namespace RobotLocalization
         }
 
         std::ostringstream ostr;
-        ostr << datum_config[0] << " " << datum_config[1] << " " << datum_config[2];
+        ostr << std::setprecision(20) << datum_config[0] << " " << datum_config[1] << " " << datum_config[2];
         std::istringstream istr(ostr.str());
         istr >> datum_lat >> datum_lon >> datum_yaw;
 
@@ -253,8 +255,8 @@ namespace RobotLocalization
        * However, all the nodes in robot_localization assume that orientation data,
        * including that reported by IMUs, is reported in an ENU frame, with a 0 yaw
        * value being reported when facing east and increasing counter-clockwise (i.e.,
-       * towards north). Conveniently, this aligns with the UTM grid, where X is east
-       * and Y is north. However, we have two additional considerations:
+       * towards north). To make the world frame ENU aligned, where X is east
+       * and Y is north, we have to take into account three additional considerations:
        *   1. The IMU may have its non-ENU frame data transformed to ENU, but there's
        *      a possibility that its data has not been corrected for magnetic
        *      declination. We need to account for this. A positive magnetic
@@ -265,11 +267,14 @@ namespace RobotLocalization
        *   2. To account for any other offsets that may not be accounted for by the
        *      IMU driver or any interim processing node, we expose a yaw offset that
        *      lets users work with navsat_transform_node.
+       *   3. UTM grid isn't aligned with True East\North. To account for the difference
+       *      we need to add meridian convergence angle.
        */
-      imu_yaw += (magnetic_declination_ + yaw_offset_);
+      imu_yaw += (magnetic_declination_ + yaw_offset_ + utm_meridian_convergence_);
 
       ROS_INFO_STREAM("Corrected for magnetic declination of " << std::fixed << magnetic_declination_ <<
-                      " and user-specified offset of " << yaw_offset_ << "." <<
+                      ", user-specified offset of " << yaw_offset_ <<
+                      " and meridian convergence of " << utm_meridian_convergence_ << "." <<
                       " Transform heading factor is now " << imu_yaw);
 
       // Convert to tf-friendly structures
@@ -378,7 +383,7 @@ namespace RobotLocalization
       double pitch;
       double yaw;
       mat.getRPY(roll, pitch, yaw);
-      yaw += (magnetic_declination_ + yaw_offset_);
+      yaw += (magnetic_declination_ + yaw_offset_ + utm_meridian_convergence_);
       utm_orientation.setRPY(roll, pitch, yaw);
 
       // Rotate the GPS linear offset by the orientation
@@ -429,7 +434,10 @@ namespace RobotLocalization
 
       if (can_transform)
       {
+        // Zero out rotation because we don't care about the orientation of the
+        // GPS receiver relative to base_link
         gps_offset_rotated.setOrigin(tf2::quatRotate(robot_orientation.getRotation(), gps_offset_rotated.getOrigin()));
+        gps_offset_rotated.setRotation(tf2::Quaternion::getIdentity());
         robot_odom_pose = gps_offset_rotated.inverse() * gps_odom_pose;
       }
       else
@@ -692,7 +700,8 @@ namespace RobotLocalization
   {
     double utm_x = 0;
     double utm_y = 0;
-    NavsatConversions::LLtoUTM(msg->latitude, msg->longitude, utm_y, utm_x, utm_zone_);
+    NavsatConversions::LLtoUTM(msg->latitude, msg->longitude, utm_y, utm_x, utm_zone_, utm_meridian_convergence_);
+    utm_meridian_convergence_ *= NavsatConversions::RADIANS_PER_DEGREE;
 
     ROS_INFO_STREAM("Datum (latitude, longitude, altitude) is (" << std::fixed << msg->latitude << ", " <<
                     msg->longitude << ", " << msg->altitude << ")");

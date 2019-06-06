@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(robot_localization)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+  message("${PROJECT_NAME}: You did not request a specific build type: selecting 'RelWithDebInfo'.")
+  set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+
 find_package(catkin REQUIRED COMPONENTS
   diagnostic_msgs
   diagnostic_updater
@@ -14,10 +19,14 @@ find_package(catkin REQUIRED COMPONENTS
   roslint
   sensor_msgs
   std_msgs
+  std_srvs
   tf2
   tf2_geometry_msgs
   tf2_ros
   xmlrpcpp)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(YAML_CPP yaml-cpp)
 
 # Attempt to find Eigen using its own CMake module.
 # If that fails, fall back to cmake_modules package.
@@ -40,16 +49,17 @@ roslint_cpp()
 ###################################
 add_service_files(
   FILES
-  GetState.srv
-  SetDatum.srv
-  SetPose.srv
+    GetState.srv
+    SetDatum.srv
+    SetPose.srv
+    ToggleFilterProcessing.srv
 )
 
 generate_messages(
   DEPENDENCIES
-  geographic_msgs
-  geometry_msgs
-  std_msgs
+    geographic_msgs
+    geometry_msgs
+    std_msgs
 )
 
 catkin_package(
@@ -62,6 +72,7 @@ catkin_package(
     navsat_transform
     ros_filter
     ros_filter_utilities
+    robot_localization_estimator
     ros_robot_localization_listener
     ukf
   CATKIN_DEPENDS
@@ -77,18 +88,27 @@ catkin_package(
     roscpp
     sensor_msgs
     std_msgs
+    std_srvs
     tf2
     tf2_geometry_msgs
     tf2_ros
     xmlrpcpp
-  DEPENDS ${EIGEN_PACKAGE}
+  DEPENDS
+    ${EIGEN_PACKAGE}
+    YAML_CPP
 )
 
 ###########
 ## Build ##
 ###########
 
-include_directories(include ${catkin_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+include_directories(
+  include
+  ${catkin_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
+  ${YAML_CPP_INCLUDE_DIRS})
+
+link_directories(${YAML_CPP_LIBRARY_DIRS})
 
 # Library definitions
 add_library(filter_utilities src/filter_utilities.cpp)
@@ -101,17 +121,16 @@ add_library(ros_filter_utilities src/ros_filter_utilities.cpp)
 add_library(ros_filter src/ros_filter.cpp)
 add_library(navsat_transform src/navsat_transform.cpp)
 
-# Dependencies
-add_dependencies(filter_base ${PROJECT_NAME}_gencpp)
-add_dependencies(navsat_transform ${PROJECT_NAME}_gencpp)
-
 # Executables
 add_executable(ekf_localization_node src/ekf_localization_node.cpp)
 add_executable(ukf_localization_node src/ukf_localization_node.cpp)
 add_executable(navsat_transform_node src/navsat_transform_node.cpp)
 add_executable(robot_localization_listener_node src/robot_localization_listener_node.cpp)
 
-add_dependencies(robot_localization_listener_node robot_localization_gencpp)
+# Dependencies
+add_dependencies(filter_base ${PROJECT_NAME}_gencpp)
+add_dependencies(navsat_transform ${PROJECT_NAME}_gencpp)
+add_dependencies(robot_localization_listener_node ${PROJECT_NAME}_gencpp)
 
 # Linking
 target_link_libraries(ros_filter_utilities ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES})
@@ -122,7 +141,7 @@ target_link_libraries(ukf filter_base ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES})
 target_link_libraries(ros_filter ekf ukf ros_filter_utilities ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES})
 target_link_libraries(robot_localization_estimator filter_utilities filter_base ekf ukf ${EIGEN3_LIBRARIES})
 target_link_libraries(ros_robot_localization_listener robot_localization_estimator ros_filter_utilities
-  ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES} yaml-cpp)
+  ${catkin_LIBRARIES} ${EIGEN3_LIBRARIES} ${YAML_CPP_LIBRARIES})
 target_link_libraries(robot_localization_listener_node ros_robot_localization_listener ${catkin_LIBRARIES})
 target_link_libraries(ekf_localization_node ros_filter ${catkin_LIBRARIES})
 target_link_libraries(ukf_localization_node ros_filter ${catkin_LIBRARIES})
@@ -143,6 +162,9 @@ install(TARGETS
   navsat_transform_node
   ros_filter
   ros_filter_utilities
+  robot_localization_estimator
+  ros_robot_localization_listener
+  robot_localization_listener_node
   ukf
   ukf_localization_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
@@ -157,8 +179,10 @@ install(DIRECTORY include/${PROJECT_NAME}/
 
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
-  FILES_MATCHING PATTERN "*.launch"
-  PATTERN ".svn" EXCLUDE)
+  FILES_MATCHING PATTERN "*.launch")
+
+install(DIRECTORY params/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/params)
 
 install(FILES
   LICENSE
